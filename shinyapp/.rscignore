@@ -1,0 +1,6 @@
+# Keep the public deployment small; all runtime assets remain in the package.
+tests
+docs
+rnhi_math.py
+未命名.Rproj
+图片 1.png

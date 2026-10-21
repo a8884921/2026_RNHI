@@ -1,6 +1,6 @@
 # 2026_RNHI
 
-Code accompanying the RNHI study (residual normal haematopoietic integrity score, and its
+Code accompanying the RNHI study (residual normal haematopoiesis integrity score, and its
 sample-/spot-level counterpart `sRNHI`): the figure code (`Figure_*`) and the R Shiny app that
 scores new samples (`shinyapp/`).
 
@@ -11,8 +11,7 @@ The figure code is organised one directory per figure and one sub-directory per 
 
 | Path | Contents |
 | --- | --- |
-| `shinyapp/` | Self-contained R Shiny application that computes the RNHI A4 score for bulk RNA / pseudobulk, annotated scRNA-seq and annotated Visium spot data. See [`shinyapp/README.md`](shinyapp/README.md). |
-| --- | --- |
+| `shinyapp/` | Self-contained R Shiny application that computes RNHI for bulk expression / lineage composition, annotated scRNA-seq and annotated Visium spot data. See [`shinyapp/README.md`](shinyapp/README.md). |
 | `common/figstyle.py` | Shared Matplotlib style, A4 canvas and font resolution (`RNHI_FONT`, default `Arial`, falling back to Liberation Sans / DejaVu Sans). |
 | `common/panel_io.py` | Panel I/O helpers: reads statistics tables from `data/statistics/`, writes figures to `output/`. |
 | `Figure_1` … `Figure_6` | Main figures, one `Panel_*/code/` folder per panel. |
@@ -40,12 +39,13 @@ assemble the individual panels drawn by the `panel.py` modules of that figure.
 ### Shiny app
 
 ```r
-install.packages(c("shiny", "bslib", "ggplot2", "DT", "readr", "dplyr", "tidyr"))
+install.packages(c("shiny", "bslib", "ggplot2", "DT", "nnls", "scales"))
 shiny::runApp("shinyapp")
 ```
 
-The app ships with its R scoring core (`shinyapp/rnhi_core.R`), demo inputs and a locked MuSiC
-reference, so it runs without the figure inputs described below.
+The app ships with its R core (`shinyapp/rnhi_core.R`), a Python implementation of the same maths
+(`shinyapp/rnhi_math.py`), simulated demo inputs and the joint deconvolution reference, so it runs
+without the figure inputs described below.
 
 ## Requirements
 
@@ -59,5 +59,9 @@ For the figure code only code is distributed: input tables are expected under `d
 (relative to this directory, see `common/panel_io.py`) and are not included; generated figures are
 written to `output/` and to the per-figure `00_output/` folders.
 
-The Shiny app is self-contained: its demo data and the locked MuSiC basis live in
-`shinyapp/data/`.
+The Shiny app is self-contained: its simulated demo inputs and the joint reference basis for bulk
+deconvolution live in `shinyapp/data/`.
+
+## License
+
+Released under the MIT license; see [`LICENSE`](LICENSE).

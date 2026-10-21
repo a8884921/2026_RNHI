@@ -1,125 +1,133 @@
 # -*- coding: utf-8 -*-
-"""RNHI math primitives — shared by ALL routes (frozen semantics).
-Given: patient composition matrix (n x k closed comps, rows sum to 1) and a center,
-score = -Aitchison = -|| CLR(sample) - CLR(center) ||_2  (after multRepl zero handling).
-Center is supplied as a composition vector (or CLR vector) computed from a donor table
-by comp_center().  Zero handling: multRepl with frac (zCompositions semantics).
+"""Python implementation of RNHI (residual normal hematopoiesis integrity).
+
+RNHI of a sample is the negative Aitchison distance between the centered log-ratio
+(CLR) transform of its nine-lineage residual normal composition x and the healthy
+center c:
+
+    RNHI(x) = -|| clr(x) - c ||_2
+
+Zeros are handled with the multiplicative replacement rule of zCompositions::multRepl:
+each zero is replaced with 0.65 times the detection limit of that lineage (its minimum
+positive proportion) and the non-zero parts are rescaled so that the composition still
+sums to 1. The healthy center is the mean CLR vector of the healthy reference donors,
+with zero replacement carried out within the donors.
+
+This module mirrors the R implementation in rnhi_core.R.
+
+Example
+-------
+>>> import pandas as pd, rnhi_math as rm
+>>> tab = pd.read_csv('data/bulk_compendium_composition.csv', index_col='sample_id')
+>>> healthy = tab[tab.healthy_reference == 1]
+>>> aml = tab[tab.healthy_reference == 0]
+>>> center = rm.comp_center(healthy)
+>>> dl = rm.detection_limits(rm.closure(aml[rm.LINEAGES].to_numpy(float)))
+>>> rnhi = rm.rnhi_score(rm.closure(aml[rm.LINEAGES].to_numpy(float)), center, dl=dl)
 """
 import numpy as np
 import pandas as pd
 
-LINE12 = ["HSC_MPP", "LMPP", "MyeProg", "Mono", "Gran", "Mega",
-          "EarlyEry", "LateEry", "B", "T", "NK", "DC"]
-G4 = ["HSC_MPP", "Myeloid", "Erythroid", "Lymphoid"]  # v3 4-lineage order
+LINEAGES = ["MyeProg", "Mono", "Gran", "Mega", "EarlyEry", "LateEry", "B", "NK", "DC"]
+LINE9 = LINEAGES
+ZERO_REPLACEMENT_FACTOR = 0.65
 
 
-def closure(x, axis=1):
+def closure(x):
+    """Rescale each row of a non-negative matrix to sum to 1."""
     x = np.asarray(x, float)
-    s = x.sum(axis=axis, keepdims=True)
-    if np.any(~np.isfinite(s)) or np.any(s <= 0):
-        raise ValueError("closure needs positive row sums")
+    if x.ndim == 1:
+        x = x[None, :]
+    if np.any(~np.isfinite(x)) or np.any(x < 0):
+        raise ValueError("abundances must be finite and non-negative")
+    s = x.sum(axis=1, keepdims=True)
+    if np.any(s <= 0):
+        raise ValueError("at least one sample has no detected lineage; RNHI is undefined")
     return x / s
 
 
-def multRepl(comp, frac=0.65):
-    """zCompositions multRepl(frac) semantics (project-frozen).
-    comp: (n,k) closed non-negative composition. Returns replaced comp (rows still sum ~1)."""
+def detection_limits(comp):
+    """Minimum positive proportion of each lineage (NaN if the lineage is never detected)."""
     comp = np.asarray(comp, float)
-    n, k = comp.shape
-    z = comp == 0
-    if np.any(comp[~z] <= 0):
-        raise ValueError("non-negative required")
-    dl = np.full(k, np.nan)
-    for j in range(k):
+    dl = np.full(comp.shape[1], np.nan)
+    for j in range(comp.shape[1]):
         pos = comp[:, j][comp[:, j] > 0]
-        dl[j] = float(np.min(pos)) if pos.size else np.nan
-    if np.any(~np.isfinite(dl)):
-        raise ValueError("an all-zero column has no detection limit")
+        if pos.size:
+            dl[j] = float(pos.min())
+    return dl
+
+
+def multRepl(comp, frac=ZERO_REPLACEMENT_FACTOR, dl=None):
+    """Multiplicative zero replacement of closed compositions (rows sum to 1).
+
+    If dl is None, detection limits are estimated from comp itself; otherwise the
+    supplied limits (e.g. the fixed limits of the bulk AML compendium) are used.
+    """
+    if not 0 < frac < 1:
+        raise ValueError("the zero-replacement factor must lie between 0 and 1")
+    comp = np.asarray(comp, float)
+    dl = detection_limits(comp) if dl is None else np.asarray(dl, float)
+    zero = comp == 0
+    needs = zero.any(axis=0)
+    if np.any(needs & ~(np.isfinite(dl) & (dl > 0))):
+        raise ValueError("no detection limit for a lineage that is zero in every sample of the group")
     out = comp.copy()
-    for i in range(n):
-        zi = np.flatnonzero(z[i])
+    for i in range(comp.shape[0]):
+        zi = np.flatnonzero(zero[i])
         if zi.size == 0:
             continue
+        nzi = np.flatnonzero(~zero[i])
         repl = frac * dl[zi]
-        sr = float(repl.sum())
-        nzi = np.setdiff1d(np.arange(k), zi)
-        sum_nz = float(comp[i, nzi].sum())
-        if sum_nz <= 0:
-            raise ValueError("row %d fully zero" % i)
-        rowsum = float(comp[i].sum())
-        scale = (rowsum - sr) / sum_nz
-        if scale <= 0 or not np.isfinite(scale):
-            raise ValueError("scale<=0 for row %d" % i)
+        scale = (comp[i].sum() - repl.sum()) / comp[i, nzi].sum()
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError("zero replacement leaves no positive mass for row %d" % i)
         out[i, zi] = repl
         out[i, nzi] = comp[i, nzi] * scale
     return out
 
 
 def clr(comp):
+    """Centered log-ratio transform of strictly positive compositions."""
     comp = np.asarray(comp, float)
     if np.any(comp <= 0):
-        raise ValueError("CLR requires positive components (run multRepl first)")
+        raise ValueError("CLR requires positive parts (apply multRepl first)")
     lx = np.log(comp)
     return lx - lx.mean(axis=-1, keepdims=True)
 
 
-def comp_center(donor_wide, method="eq_donor_mean", lineage=LINE12, frac=0.65):
-    """donor_wide: DataFrame (donors x lineage cols). Returns CLR-space center vector (k,).
-    method:
-      'eq_donor_mean' : per-donor composition -> multRepl -> CLR -> arithmetic mean over donors
-      'eq_donor_geo'  : geometric mean composition across donors (closure of geometric means) -> CLR
-      'pooled'        : pooled counts -> closure -> multRepl -> CLR
-      'bary_const'    : donor_wide is a single-row constant composition
+def comp_center(donor_wide, method="eq_donor_mean", lineage=LINEAGES, frac=ZERO_REPLACEMENT_FACTOR):
+    """Healthy center: mean CLR vector of the healthy donors (donors weighted equally).
+
+    donor_wide: DataFrame with one row per donor and the lineage columns.
+    Zero replacement is carried out within the donors.
     """
-    X = donor_wide.reindex(columns=lineage).fillna(0).to_numpy(float)
-    # drop donor rows with zero total on the selected axes (no measurable composition in this space)
-    X = X[X.sum(axis=1) > 0]
-    if len(X) == 0:
-        raise ValueError("no donor with positive total on %s" % (lineage,))
-    if method == "eq_donor_mean":
-        C = closure(X)
-        Cr = multRepl(C, frac)
-        return clr(Cr).mean(axis=0)
-    if method == "eq_donor_geo":
-        C = closure(X)
-        Cr = multRepl(C, frac)
-        gm = np.exp(np.log(Cr).mean(axis=0))
-        gm = closure(gm[None, :])[0]
-        return clr(gm[None, :])[0]
-    if method == "pooled":
-        tot = X.sum(axis=0)
-        c = closure(tot[None, :])
-        cr = multRepl(c, frac)
-        return clr(cr)[0]
-    if method == "bary_const":
-        arr = donor_wide.reindex(columns=lineage).fillna(0).to_numpy(float)
-        if arr.ndim == 1:
-            arr = arr[None, :]
-        c = closure(arr)
-        cr = multRepl(c, frac)
-        return clr(cr)[0]
-    raise ValueError(method)
+    if method != "eq_donor_mean":
+        raise ValueError("the RNHI healthy center is the equal-donor mean CLR vector ('eq_donor_mean')")
+    missing = [c for c in lineage if c not in donor_wide.columns]
+    if missing:
+        raise ValueError("missing lineage columns: %s" % ", ".join(missing))
+    X = donor_wide[list(lineage)].to_numpy(float)
+    return clr(multRepl(closure(X), frac)).mean(axis=0)
 
 
-def rnhi_score(comp, center_clr, frac=0.65, weights=None):
-    """comp (n,k closed); center_clr (k,). Return -Aitchison distance (n,).
-    weights: optional per-axis weights (1=equal) to down-weight noisy axes."""
-    comp = np.asarray(comp, float)
-    Cr = multRepl(comp, frac)
-    CL = clr(Cr)
-    d = CL - center_clr[None, :]
-    if weights is not None:
-        d = d * np.asarray(weights, float)[None, :]
-    return -np.linalg.norm(d, axis=1)
+healthy_center = comp_center
 
 
-def donor_axis_weights(donor_wide, lineage=LINE12, frac=0.65, power=1.0):
-    """Weight = 1/(healthy-donor sd of each CLR axis)^power, standardized so mean=1."""
-    X = donor_wide.reindex(columns=lineage).fillna(0).to_numpy(float)
-    Cr = multRepl(closure(X), frac)
-    CL = clr(Cr)
-    sd = CL.std(axis=0)
-    sd = np.where(sd < 1e-9, np.nan, sd)
-    w = (1.0 / sd) ** power
-    w = np.where(np.isnan(w), 1.0, w)
-    return w / w.mean()
+def rnhi_score(comp, center_clr, frac=ZERO_REPLACEMENT_FACTOR, dl=None):
+    """RNHI (negative Aitchison distance to the healthy center) of closed compositions."""
+    d = clr(multRepl(comp, frac, dl)) - np.asarray(center_clr, float)[None, :]
+    return -np.sqrt((d ** 2).sum(axis=1))
+
+
+def score_table(table, healthy=None, dl=None, frac=ZERO_REPLACEMENT_FACTOR):
+    """Score a wide composition table (DataFrame indexed by sample_id with the nine lineage columns).
+
+    healthy: DataFrame of healthy reference donors (same columns) used for the center.
+    dl: detection limits for the query samples; None estimates them from `table`.
+    Returns a Series of RNHI values indexed like `table`.
+    """
+    if healthy is None:
+        raise ValueError("a healthy reference table is required")
+    center = comp_center(healthy, lineage=LINEAGES, frac=frac)
+    comp = closure(table[LINEAGES].to_numpy(float))
+    return pd.Series(rnhi_score(comp, center, frac, dl), index=table.index, name="RNHI")

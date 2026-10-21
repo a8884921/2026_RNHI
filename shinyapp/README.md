@@ -1,77 +1,65 @@
-# AML RNHI Shiny app
+# RNHI Calculator
 
-This app calculates the frozen AML RNHI A4 score for bulk RNA/pseudobulk, annotated scRNA-seq, and annotated Visium spot data. RNHI means **Residual Normal Hematopoiesis Index**. A4 is the nine-lineage measurable normal-hematopoiesis subcomposition used by the project: MyeProg, Mono, Gran, Mega, EarlyEry, LateEry, B, NK and DC. The final package is self-contained and includes the R calculation core in `rnhi_core.R` so it also works when the project path contains Chinese characters.
+Shiny application that computes residual normal hematopoiesis integrity (RNHI) for AML samples from bulk expression or lineage composition data, annotated scRNA-seq data and Visium spot data.
+
+## Definition
+
+RNHI uses the relative composition of nine lineages of residual normal hematopoiesis: MyeProg, Mono, Gran, Mega, EarlyEry, LateEry, B, NK and DC.
+
+1. Closure: the nine lineage abundances are rescaled to sum to 1.
+2. Zero replacement: zeros are replaced with 0.65 × the detection limit of the lineage (its minimum positive proportion), and non-zero parts are rescaled (following the multiplicative replacement rule of `zCompositions::multRepl`; no lineage is removed).
+3. CLR transformation: `clr(x) = log(x) - mean(log(x))`.
+4. Healthy center `c`: mean CLR vector of the healthy reference donors (default: 45 BoneMarrowMap donors; zero replacement within the donors).
+5. `RNHI(x) = -||clr(x) - c||_2`, the negative Aitchison distance (RNHI ≤ 0; closer to 0 = closer to healthy bone marrow).
+
+Detection limits (both options are available in every input mode):
+
+- Fixed (default for bulk data): limits of the bulk AML compendium (3,377 transcriptomes; `data/bulk_compendium_composition.csv`), so each sample is scored independently of the other uploaded samples. Transcriptomes without any detected lineage do not affect the limits.
+- Estimated (default for scRNA-seq and Visium data): minimum positive proportion of each lineage among the uploaded query samples, so scores depend on the uploaded set.
+- Healthy reference samples always use limits estimated within the reference.
+
+Bulk expression matrices are converted to relative abundances over the reference genes, genes with zero counts are removed, and each sample is deconvolved with the MuSiC estimator (weighted non-negative least squares, default settings; `music_wnnls` in `rnhi_core.R`, which reproduces `MuSiC::music.iter`) against a joint reference of 12 normal and 7 AML cell states (`data/joint_reference_basis.rds`, 7,000 genes). At least 10% of the reference genes must be present, and at least 20% of these must be expressed in each sample. Log-transformed values are rejected.
+
+## Input
+
+| Input | Required columns |
+|---|---|
+| Composition, wide | `sample_id` and the nine lineage columns |
+| Composition, long | `sample_id`, `cell_type`, `abundance` (repeated pairs are summed) |
+| Bulk expression | gene symbols in the first column, one column per sample, linear-scale values |
+| scRNA-seq metadata | `sample_id` or `orig.ident`, `celltype`; optional `umap_1`, `umap_2` |
+| Visium | `spot_id` or `barcode`, `celltype` (metadata), or `spot_id`, `cell_type`, `abundance`; optional coordinates `x`, `y`, `imagecol`, `imagerow` or `pxl_col_in_fullres`, `pxl_row_in_fullres` |
+
+Column names and lineage labels are matched without regard to case. Cell types other than the nine lineages must be removed before upload.
+
+Optional `healthy_reference` column: `1` = healthy reference sample, `0` = query sample. A separate healthy reference table (same format as the query data) can also be uploaded.
+
+## Output
+
+`RNHI`, `aitchison_distance`, `detected_lineages`, `lineage_total` (sum of the nine abundances before closure; not used in RNHI), `qc_flag` (single detected lineage), `prop_*` (closed lineage proportions) and `clr_diff_*` (CLR difference from the healthy center; the squared differences sum to the squared Aitchison distance).
 
 ## Run locally
 
 ```r
-install.packages(c("shiny", "bslib", "ggplot2", "DT", "readr", "dplyr", "tidyr"))
-# Optional but recommended for the primary bulk-expression path.
-# The app has a deterministic locked-basis fallback if MuSiC is unavailable.
-# if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager")
-# BiocManager::install("MuSiC", ask=FALSE, update=FALSE)
-shiny::runApp("/path/to/RNHI_ShinyApp")
+install.packages(c("shiny", "bslib", "ggplot2", "DT", "nnls", "scales"))
+shiny::runApp("shinyapp")
 ```
 
-## Input format
+## Files
 
-Wide composition input has one row per sample (or Visium spot) and these columns:
-`sample_id` (required; `spot_id` is also accepted), `MyeProg, Mono, Gran, Mega, EarlyEry, LateEry, B, NK, DC`.
-
-Long composition input has `sample_id, cell_type, abundance`; repeated rows are summed. For scRNA, the compact input can instead be a Seurat `meta.data` export with `celltype` and `sample_id` (or `orig.ident`): the app counts cells by sample and lineage automatically. For Visium, upload one row per annotated spot/cell with `celltype`, `spot_id` (or `sample_id`) and optional `x,y` or `imagecol,imagerow`; the app counts cells by spot and lineage automatically. The nine frozen lineage names must be used. A healthy reference can be uploaded in either composition format; otherwise the bundled 45 healthy-donor reference is used.
-
-Bulk expression matrices are recognized automatically when the first column is a gene identifier and the remaining columns are samples. They are deconvolved with the bundled locked MuSiC reference (`data/music_basis.rds`) and then scored with the same frozen A4 RNHI core. Pre-computed nine-lineage bulk composition is also accepted. MuSiC is used when available; a deterministic locked-basis projection keeps the public example runnable on hosts where Bioconductor MuSiC is not installed, and the result message labels which path was used.
-If any MuSiC sample fails quality/convergence checks, the app stops with the failed sample IDs and reasons rather than returning a partial result.
-
-The compact metadata formats accepted by the two single-cell modes are:
-
-| scRNA meta.data column | Example | Meaning |
-|---|---|---|
-| `orig.ident` (or `sample_id`) | `Van_01` | Sample used for the RNHI score |
-| `celltype` | `Mono` | One of the nine frozen lineages |
-| `umap_1`, `umap_2` | `1.42`, `-0.73` | Optional coordinates retained in the UMAP |
-
-| Visium metadata column | Example | Meaning |
-|---|---|---|
-| `spot_id` (or `sample_id`) | `AAAC...-1` | Spot used for the RNHI score |
-| `celltype` | `Gran` | Annotated lineage counted within the spot |
-| `x`, `y` (or `imagecol`, `imagerow`) | `152`, `284` | Optional spatial coordinates retained in the map |
-
-For these metadata inputs, every row is an annotated cell/spot record. The app counts rows by ID × `celltype`; you do not need to pre-compute an `abundance` column.
-When image coordinates (`imagecol/imagerow` or `pxl_col_in_fullres/pxl_row_in_fullres`) are supplied, the map reverses the y-axis to preserve the usual top-left image orientation. Ordinary `x,y` coordinates are shown in their original Cartesian direction.
-
-The same examples are shown as tables in the app guide. For copy/paste workflows, the minimum wide table is:
-
-| sample_id | MyeProg | Mono | Gran | Mega | EarlyEry | LateEry | B | NK | DC |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| AML_001 | 120 | 80 | 450 | 15 | 210 | 95 | 40 | 30 | 20 |
-
-The minimum long table is:
-
-| sample_id | cell_type | abundance |
-|---|---|---:|
-| AML_001 | MyeProg | 120 |
-| AML_001 | Mono | 80 |
-| AML_001 | Gran | 450 |
-| AML_001 | Mega | 15 |
-| AML_001 | EarlyEry | 210 |
-| AML_001 | LateEry | 95 |
-| AML_001 | B | 40 |
-| AML_001 | NK | 30 |
-| AML_001 | DC | 20 |
-
-The implementation follows the project audit: closure within the nine lineages, multiplicative zero replacement (`frac=0.65`) with healthy and query detection limits computed separately, equal-donor healthy CLR center, and `RNHI = -Aitchison distance`. Values closer to zero are more healthy-like; more negative values indicate greater compositional imbalance. `selected_lineage_total` is shown as a separate quality/context variable and does not enter RNHI. The project excludes HSC_MPP/LMPP/T from A4 because they do not meet the frozen detection criterion.
-
-## Verified local data workflow
-
-The real local file `composition_A4.csv` is selectable from the app with the **example** button in Bulk RNA mode. It contains 3,355 records (45 healthy reference donors and 3,310 AML query samples). The scRNA and Visium modes use small bundled examples so that their UMAP and spatial views can be tested immediately; the Visium example contains 144 spots for a readable tissue-style map. The **Refresh / reset** button returns to the input guide. The browser test uploads the same real file, clicks **Calculate RNHI**, verifies the result table, density plot and ordered composition heatmap, and writes a screenshot on demand to `tests/browser_real_data_results.png` (the screenshot is not required for deployment). The regression script compares the 3,310 AML scores with the formal `a4_rnhi_scores.csv` output.
-
-Run the regression check with `Rscript tests/local_real_data_test.R`. The real-expression smoke test is `Rscript tests/local_music_test.R` (first eight BeatAML2 samples through MuSiC). For browser checks, start the app on port 3840 and run `Rscript tests/browser_modalities_test.R` and `Rscript tests/browser_metadata_test.R`; `Rscript tests/browser_upload_test.R` additionally uploads the full local A4 table (requires the installed `chromote` package and Chrome).
+| Path | Content |
+|---|---|
+| `app.R`, `rnhi_core.R` | Application and R implementation |
+| `rnhi_math.py` | Python implementation |
+| `data/bulk_compendium_composition.csv` | Nine-lineage compositions of the 45 healthy reference donors and of the AML transcriptomes of the bulk compendium (3,377 transcriptomes, 11 public datasets) in which at least one lineage is detected (n = 3,310) |
+| `data/joint_reference_basis.rds` | Reference for bulk deconvolution |
+| `data/simulated_*.csv` | Simulated example inputs (see `data/DATASETS.md`) |
+| `tests/` | Regression tests (`Rscript tests/test_rnhi.R`, `python3 tests/test_rnhi_python.py`) and reference values |
 
 ## Deployment
 
-The folder is self-contained and can be deployed with `rsconnect::deployApp()` to shinyapps.io or Posit Connect. Do not publish identifiable clinical data.
+```r
+rsconnect::deployApp("shinyapp", appName = "RNHI")
+```
 
-## Bundled demo
-
-`example_data.csv` and `example_results.csv` are included for the small demo. The full local A4 input is `composition_A4.csv`; the app's **example** button selects the mode-appropriate bundled file without a file chooser. Each input guide displays structured Markdown-style tables with the exact column names and accepted values. The Bulk guide displays both the nine-lineage composition example and the gene-by-sample MuSiC example.
+For research use only.
